@@ -11,12 +11,11 @@ import numpy as np
 import pandas as pd
 from sklearn.compose import ColumnTransformer
 from sklearn.preprocessing import OneHotEncoder
-from sklearn.pipeline import Pipeline
 from xgboost import XGBRegressor
 
 from app.core.config import AppConfig, get_config
-from app.core.dataset import ensure_dummy_dataset_csv
-from app.schemas import EventType, PredictRequest, PredictResponse, ProductPrediction
+from app.core.dataset import ensure_training_dataset_csv
+from app.schemas import PredictRequest, PredictResponse, ProductPrediction
 
 
 @dataclass(frozen=True)
@@ -25,10 +24,12 @@ class ModelArtifacts:
     preprocessor: ColumnTransformer
     product_models: Dict[str, Any]
     products: List[str]
+    baseline_lookup: Dict[Tuple[str, str, str], float]
+    support_lookup: Dict[Tuple[str, str, str], int]
 
 
 class HyperlocalModelService:
-    ARTIFACT_VERSION = 3
+    ARTIFACT_VERSION = 5
 
     def __init__(
         self,
@@ -62,8 +63,24 @@ class HyperlocalModelService:
         X_encoded = preprocessor.transform(X)
 
         product_models: Dict[str, Any] = {}
+        baseline_lookup: Dict[Tuple[str, str, str], float] = {}
+        support_lookup: Dict[Tuple[str, str, str], int] = {}
         for product in self.cfg.products:
             y = df[f"demand_{product.lower()}"].astype(float).values
+            baseline_col = f"baseline_{product.lower()}"
+            support_col = f"support_{product.lower()}"
+
+            grouped = (
+                df.groupby(["zone", "event"], as_index=False)
+                .agg(
+                    baseline=(baseline_col, "mean"),
+                    support=(support_col, "max"),
+                )
+            )
+            for row in grouped.itertuples():
+                key = (str(row.zone), str(row.event), product)
+                baseline_lookup[key] = float(row.baseline)
+                support_lookup[key] = int(row.support)
 
             # Small training budget: fast enough for a demo.
             model = XGBRegressor(
@@ -83,6 +100,8 @@ class HyperlocalModelService:
             preprocessor=preprocessor,
             product_models=product_models,
             products=list(self.cfg.products),
+            baseline_lookup=baseline_lookup,
+            support_lookup=support_lookup,
         )
 
     def _artifacts_are_compatible(self, artifacts: Any) -> bool:
@@ -103,7 +122,7 @@ class HyperlocalModelService:
                     self._artifacts = artifacts
                     return
 
-            dataset_csv = ensure_dummy_dataset_csv()
+            dataset_csv = ensure_training_dataset_csv()
             df = pd.read_csv(dataset_csv)
             artifacts = self._train_models(df)
             joblib.dump(artifacts, self.artifact_path)
@@ -132,21 +151,23 @@ class HyperlocalModelService:
             recommended = batch
         return int(recommended)
 
-    def _apply_live_time_adjustment(self, product: str, req: PredictRequest, predicted_demand: float) -> float:
-        minute_phase = 2.0 * np.pi * (req.minute_value / 60.0)
-        second_phase = 2.0 * np.pi * (req.second_value / 60.0)
+    def _blend_with_historical_baseline(
+        self,
+        artifacts: ModelArtifacts,
+        product: str,
+        req: PredictRequest,
+        predicted_demand: float,
+    ) -> float:
+        key = (req.zone, req.event, product)
+        baseline = artifacts.baseline_lookup.get(key)
+        if baseline is None:
+            return float(max(2.0, min(200.0, predicted_demand)))
 
-        base_wave = 1.0 + 0.03 * np.sin(minute_phase) + 0.02 * np.cos(second_phase)
-        product_boost = {
-            "Coffee": 1.35,
-            "Snacks": 1.20,
-            "Bread": 1.15,
-            "Water": 1.10,
-        }.get(product, 1.0)
-
-        event_boost = 1.1 if req.event == "rain" and product in {"Coffee", "Snacks"} else 1.0
-        adjusted = predicted_demand * (1.0 + ((base_wave - 1.0) * product_boost * event_boost))
-        return float(max(2.0, min(200.0, adjusted)))
+        support = max(0, artifacts.support_lookup.get(key, 0))
+        # Stronger historical coverage makes the response follow the replacement CSV more closely.
+        baseline_weight = min(0.8, 0.3 + (np.log1p(support) * 0.12))
+        blended = (predicted_demand * (1.0 - baseline_weight)) + (baseline * baseline_weight)
+        return float(max(2.0, min(200.0, blended)))
 
     def predict(self, req: PredictRequest) -> PredictResponse:
         self.load_or_train()
@@ -172,7 +193,7 @@ class HyperlocalModelService:
         for product in artifacts.products:
             model = artifacts.product_models[product]
             y_pred = float(model.predict(X_encoded)[0])
-            y_pred = self._apply_live_time_adjustment(product, req, y_pred)
+            y_pred = self._blend_with_historical_baseline(artifacts, product, req, y_pred)
 
             priority = self._compute_priority(product, y_pred)
             recommended = self._compute_recommended_stock(product, y_pred, priority)

@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from app.core.config import get_config
+from app.core.dataset import get_available_zones
 from app.schemas import MetaResponse
 
 
@@ -23,7 +24,7 @@ def get_meta() -> MetaResponse:
         "Vegetables": "Dinner essentials",
     }
     return MetaResponse(
-        zones=list(cfg.zones),
+        zones=get_available_zones(),
         products=list(cfg.products),
         current_stock=dict(cfg.current_stock),
         product_descriptions=descriptions,
