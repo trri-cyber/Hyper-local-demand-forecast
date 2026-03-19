@@ -21,12 +21,15 @@ from app.schemas import EventType, PredictRequest, PredictResponse, ProductPredi
 
 @dataclass(frozen=True)
 class ModelArtifacts:
+    version: int
     preprocessor: ColumnTransformer
     product_models: Dict[str, Any]
     products: List[str]
 
 
 class HyperlocalModelService:
+    ARTIFACT_VERSION = 3
+
     def __init__(
         self,
         cfg: AppConfig | None = None,
@@ -41,19 +44,19 @@ class HyperlocalModelService:
         self._artifacts: ModelArtifacts | None = None
 
     def _build_preprocessor(self) -> ColumnTransformer:
-        # Keep it simple: one-hot encode categoricals, pass hour through.
+        # Keep it simple: one-hot encode categoricals, pass continuous time features through.
         return ColumnTransformer(
             transformers=[
                 ("zone", OneHotEncoder(handle_unknown="ignore", sparse_output=False), ["zone"]),
                 ("event", OneHotEncoder(handle_unknown="ignore", sparse_output=False), ["event"]),
             ],
-            remainder="passthrough",  # hour
+            remainder="passthrough",  # hour, minute, second
         )
 
     def _train_models(self, df: pd.DataFrame) -> ModelArtifacts:
         preprocessor = self._build_preprocessor()
 
-        feature_cols = ["zone", "hour", "event"]
+        feature_cols = ["zone", "hour", "minute", "second", "event"]
         X = df[feature_cols]
         preprocessor.fit(X)
         X_encoded = preprocessor.transform(X)
@@ -76,10 +79,19 @@ class HyperlocalModelService:
             product_models[product] = model
 
         return ModelArtifacts(
+            version=self.ARTIFACT_VERSION,
             preprocessor=preprocessor,
             product_models=product_models,
             products=list(self.cfg.products),
         )
+
+    def _artifacts_are_compatible(self, artifacts: Any) -> bool:
+        if not isinstance(artifacts, ModelArtifacts):
+            return False
+        artifact_version = getattr(artifacts, "version", None)
+        if artifact_version != self.ARTIFACT_VERSION:
+            return False
+        return True
 
     def load_or_train(self) -> None:
         with self._lock:
@@ -87,8 +99,9 @@ class HyperlocalModelService:
                 return
             if self.artifact_path.exists():
                 artifacts = joblib.load(self.artifact_path)
-                self._artifacts = artifacts
-                return
+                if self._artifacts_are_compatible(artifacts):
+                    self._artifacts = artifacts
+                    return
 
             dataset_csv = ensure_dummy_dataset_csv()
             df = pd.read_csv(dataset_csv)
@@ -119,6 +132,22 @@ class HyperlocalModelService:
             recommended = batch
         return int(recommended)
 
+    def _apply_live_time_adjustment(self, product: str, req: PredictRequest, predicted_demand: float) -> float:
+        minute_phase = 2.0 * np.pi * (req.minute_value / 60.0)
+        second_phase = 2.0 * np.pi * (req.second_value / 60.0)
+
+        base_wave = 1.0 + 0.03 * np.sin(minute_phase) + 0.02 * np.cos(second_phase)
+        product_boost = {
+            "Coffee": 1.35,
+            "Snacks": 1.20,
+            "Bread": 1.15,
+            "Water": 1.10,
+        }.get(product, 1.0)
+
+        event_boost = 1.1 if req.event == "rain" and product in {"Coffee", "Snacks"} else 1.0
+        adjusted = predicted_demand * (1.0 + ((base_wave - 1.0) * product_boost * event_boost))
+        return float(max(2.0, min(200.0, adjusted)))
+
     def predict(self, req: PredictRequest) -> PredictResponse:
         self.load_or_train()
         assert self._artifacts is not None
@@ -128,11 +157,13 @@ class HyperlocalModelService:
             [
                 {
                     "zone": req.zone,
-                    "hour": req.time,
+                    "hour": req.hour_value,
+                    "minute": req.minute_value,
+                    "second": req.second_value,
                     "event": req.event,
                 }
             ],
-            columns=["zone", "hour", "event"],
+            columns=["zone", "hour", "minute", "second", "event"],
         )
         X_encoded = artifacts.preprocessor.transform(X_new)
 
@@ -141,8 +172,7 @@ class HyperlocalModelService:
         for product in artifacts.products:
             model = artifacts.product_models[product]
             y_pred = float(model.predict(X_encoded)[0])
-            # Keep within realistic bounds for the demo UI.
-            y_pred = float(max(2.0, min(200.0, y_pred)))
+            y_pred = self._apply_live_time_adjustment(product, req, y_pred)
 
             priority = self._compute_priority(product, y_pred)
             recommended = self._compute_recommended_stock(product, y_pred, priority)

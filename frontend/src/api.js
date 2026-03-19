@@ -6,10 +6,11 @@ export async function fetchMeta() {
   return res.json();
 }
 
-export async function predict(payload) {
+export async function predict(payload, signal) {
   const res = await fetch(`${API_BASE}/predict`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    signal,
     body: JSON.stringify(payload),
   });
   if (!res.ok) {

@@ -2,6 +2,15 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import Chart from "chart.js/auto";
 import { fetchMeta, predict } from "../api.js";
 
+function getCurrentTimeString() {
+  return new Date().toLocaleTimeString("en-GB", {
+    hour12: false,
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
 function formatPriority(priority) {
   const p = String(priority);
   if (p === "High") return { text: "High", color: "#dc3545" };
@@ -9,10 +18,15 @@ function formatPriority(priority) {
   return { text: "Low", color: "#28a745" };
 }
 
+function formatDelta(current, previous) {
+  const delta = Number(current) - Number(previous);
+  return `${delta >= 0 ? "+" : ""}${delta.toFixed(2)}`;
+}
+
 export default function Dashboard() {
   const [meta, setMeta] = useState(null);
   const [zone, setZone] = useState("");
-  const [time, setTime] = useState(18);
+  const [time, setTime] = useState(() => getCurrentTimeString());
   const [event, setEvent] = useState("normal");
 
   const [autoRun, setAutoRun] = useState(true);
@@ -25,6 +39,8 @@ export default function Dashboard() {
   const canvasRef = useRef(null);
   const chartInstanceRef = useRef(null);
   const debounceTimerRef = useRef(null);
+  const requestControllerRef = useRef(null);
+  const requestSequenceRef = useRef(0);
 
   const productOrder = useMemo(() => {
     if (!meta?.products) return [];
@@ -36,39 +52,44 @@ export default function Dashboard() {
     return productOrder;
   }, [productOrder]);
 
-  async function runSimulation({ keepPrev = true } = {}) {
-    if (!meta) return;
-    setLoading(true);
-    setError("");
-    try {
-      const payload = { zone, time, event };
-      const data = await predict(payload);
-      setResults(data);
-      if (keepPrev) {
-        setPrevResults((oldPrev) => (oldPrev ? oldPrev : null));
-      } else {
-        setPrevResults(null);
-      }
-    } catch (e) {
-      setError(e?.message || "Prediction failed");
-    } finally {
-      setLoading(false);
-    }
-  }
+  useEffect(() => {
+    const timerId = window.setInterval(() => {
+      setTime(getCurrentTimeString());
+    }, 1000);
 
-  async function runWithCompare() {
+    return () => {
+      window.clearInterval(timerId);
+    };
+  }, []);
+
+  async function runSimulation({ compareWithPrevious = false } = {}) {
     if (!meta) return;
+    if (requestControllerRef.current) {
+      requestControllerRef.current.abort();
+    }
+
+    const controller = new AbortController();
+    requestControllerRef.current = controller;
+    const requestId = requestSequenceRef.current + 1;
+    requestSequenceRef.current = requestId;
+    const currentResults = results;
+
     setLoading(true);
     setError("");
     try {
       const payload = { zone, time, event };
-      setPrevResults(results);
-      const data = await predict(payload);
+      const data = await predict(payload, controller.signal);
+      if (requestId !== requestSequenceRef.current) return;
+
+      setPrevResults(compareWithPrevious ? currentResults : null);
       setResults(data);
     } catch (e) {
+      if (e?.name === "AbortError") return;
       setError(e?.message || "Prediction failed");
     } finally {
-      setLoading(false);
+      if (requestId === requestSequenceRef.current) {
+        setLoading(false);
+      }
     }
   }
 
@@ -87,12 +108,23 @@ export default function Dashboard() {
     };
   }, []);
 
+  useEffect(() => {
+    return () => {
+      if (requestControllerRef.current) {
+        requestControllerRef.current.abort();
+      }
+      if (chartInstanceRef.current) {
+        chartInstanceRef.current.destroy();
+      }
+    };
+  }, []);
+
   // Auto-run on input changes (what-if simulation).
   useEffect(() => {
     if (!autoRun || !meta) return;
     if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
     debounceTimerRef.current = setTimeout(() => {
-      runWithCompare();
+      runSimulation({ compareWithPrevious: Boolean(results) });
     }, 600);
 
     return () => {
@@ -229,16 +261,9 @@ export default function Dashboard() {
               </label>
 
               <label>
-                Time (hour of day)
-                <div className="sliderRow">
-                  <input
-                    type="range"
-                    min={0}
-                    max={23}
-                    value={time}
-                    onChange={(e) => setTime(Number(e.target.value))}
-                  />
-                  <div className="sliderValue">{time}:00</div>
+                Time (hh:mm:ss)
+                <div className="timeDisplay" aria-live="polite">
+                  {time}
                 </div>
               </label>
 
@@ -263,7 +288,11 @@ export default function Dashboard() {
                   <input type="checkbox" checked={autoRun} onChange={(e) => setAutoRun(e.target.checked)} />
                   Auto-run what-if
                 </label>
-                <button className="primaryButton" onClick={runWithCompare} disabled={loading || !zone}>
+                <button
+                  className="primaryButton"
+                  onClick={() => runSimulation({ compareWithPrevious: Boolean(results) })}
+                  disabled={loading || !zone}
+                >
                   {loading ? "Predicting..." : "Run Simulation"}
                 </button>
                 <button className="secondaryButton" onClick={resetCompare} disabled={loading}>
@@ -290,9 +319,7 @@ export default function Dashboard() {
               {prevResults ? (
                 <div className="summaryCard">
                   <div className="summaryLabel">Delta vs previous</div>
-                  <div className="summaryValue">
-                    {(Number(results.total_predicted_demand) - Number(prevResults.total_predicted_demand)).toFixed(1)}
-                  </div>
+                  <div className="summaryValue">{formatDelta(results.total_predicted_demand, prevResults.total_predicted_demand)}</div>
                 </div>
               ) : (
                 <div className="summaryCard muted">

@@ -74,20 +74,17 @@ select {
   padding: 8px 10px;
 }
 
-.sliderRow {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-input[type="range"] {
+.timeDisplay {
   width: 100%;
-}
-
-.sliderValue {
-  min-width: 68px;
-  text-align: right;
-  color: var(--muted);
+  margin-top: 6px;
+  background: #0c142a;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 18px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.08em;
 }
 
 .eventGroup {

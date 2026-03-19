@@ -12,11 +12,11 @@ from app.core.config import AppConfig, get_config
 
 @dataclass(frozen=True)
 class DummyDatasetConfig:
-    rows: int = 360
-    noise_std: float = 3.5
+    rows: int = 720
+    noise_std: float = 2.5
 
 
-def _hour_multiplier(hour: int, event: str) -> float:
+def _hour_multiplier(hour: float, event: str) -> float:
     # Simple "realistic" shape: higher demand during evening/morning peaks.
     # Rain increases "comfort" items and also boosts snack/coffee.
     base = 0.75
@@ -35,6 +35,20 @@ def _hour_multiplier(hour: int, event: str) -> float:
         # Rain tends to increase overall footfall for convenience shopping.
         base *= 1.08
     return base
+
+
+def _minute_second_multiplier(hour: int, minute: int, second: int, product: str) -> float:
+    # Add small intra-hour variation so predictions react to hh:mm:ss too.
+    minute_wave = 1.0 + 0.035 * np.sin((minute / 60.0) * 2 * np.pi)
+    second_wave = 1.0 + 0.015 * np.cos((second / 60.0) * 2 * np.pi)
+
+    if product in {"Coffee", "Bread"} and minute >= 40:
+        minute_wave *= 1.03
+    if product in {"Snacks", "Water"} and minute <= 15:
+        minute_wave *= 0.99
+    if product == "Coffee" and hour in {7, 8, 17, 18}:
+        second_wave *= 1.02
+    return float(minute_wave * second_wave)
 
 
 def _event_multiplier(event: str, product: str) -> float:
@@ -104,19 +118,30 @@ def generate_dummy_dataset(
     # Construct a grid-ish dataset then add noise; deterministic shuffle for variety.
     zones = cfg.zones
     events = cfg.events
-    # Use a subset of hours to keep rows small.
     hours = list(range(0, 24))
+    minutes = list(range(0, 60, 5))
+    seconds = list(range(0, 60, 10))
 
     # Sample combinations uniformly; keep it small.
     for i in range(ds_cfg.rows):
         zone = zones[i % len(zones)]
         event = events[(i // len(zones)) % len(events)]
         hour = hours[(i * 3) % len(hours)]
+        minute = minutes[(i * 7) % len(minutes)]
+        second = seconds[(i * 11) % len(seconds)]
+        hour_float = hour + (minute / 60.0) + (second / 3600.0)
 
-        row: Dict[str, object] = {"zone": zone, "hour": hour, "event": event}
+        row: Dict[str, object] = {
+            "zone": zone,
+            "hour": hour_float,
+            "minute": minute,
+            "second": second,
+            "event": event,
+        }
         for product in cfg.products:
             mult = (
-                _hour_multiplier(hour, event)
+                _hour_multiplier(hour_float, event)
+                * _minute_second_multiplier(hour, minute, second, product)
                 * _event_multiplier(event, product)
                 * _zone_multiplier(zone, product)
             )
@@ -144,8 +169,14 @@ def ensure_dummy_dataset_csv(csv_path: Path | None = None) -> Path:
     if csv_path is None:
         csv_path = Path(__file__).resolve().parent.parent / "data" / "dummy_dataset.csv"
     csv_path = Path(csv_path)
+    required_columns = {"zone", "hour", "minute", "second", "event"}
     if csv_path.exists() and csv_path.stat().st_size > 0:
-        return csv_path
+        try:
+            existing = pd.read_csv(csv_path, nrows=1)
+            if required_columns.issubset(set(existing.columns)):
+                return csv_path
+        except Exception:
+            pass
     generate_dummy_dataset(csv_path, cfg)
     return csv_path
 
