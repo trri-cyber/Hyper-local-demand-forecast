@@ -1,0 +1,16 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: hyperlocal-postgres
+    environment:
+      POSTGRES_USER: hyper
+      POSTGRES_PASSWORD: hyper
+      POSTGRES_DB: hyperlocal
+    ports:
+      - "5432:5432"
+    volumes:
+      - hyperlocal_postgres_data:/var/lib/postgresql/data
+
+volumes:
+  hyperlocal_postgres_data:
+
