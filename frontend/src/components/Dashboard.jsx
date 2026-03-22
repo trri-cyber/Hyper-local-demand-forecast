@@ -456,7 +456,7 @@ export default function Dashboard() {
               <ActivityIcon /> Live Forecast
             </div>
             <h1 style={styles.h1}>Hyperlocal Demand<br/>Forecast</h1>
-            <div style={styles.subtitle}>Real-time prediction engine · What-if simulation mode</div>
+            <div style={styles.subtitle}>Real-time prediction engine simulation mode</div>
           </div>
           <button
             style={styles.themeToggle}
@@ -513,7 +513,7 @@ export default function Dashboard() {
 
                 {/* Auto-run toggle */}
                 <div style={styles.autoRunRow}>
-                  <span style={{ fontSize: 13, color: t.textMuted, fontWeight: 500 }}>Auto-run what-if</span>
+                  <span style={{ fontSize: 13, color: t.textMuted, fontWeight: 500 }}>Auto-run</span>
                   <div
                     style={styles.toggleTrack(autoRun)}
                     onClick={() => setAutoRun(!autoRun)}
